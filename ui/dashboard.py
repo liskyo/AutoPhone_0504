@@ -17,6 +17,7 @@ class DashboardApp:
         
         self.cam_labels = []
         self.cam_canvases = []
+        self.cam_status_codes = [None] * CAMERA_COUNT
         self.tk_images = [None] * CAMERA_COUNT 
         self.original_images = [None] * CAMERA_COUNT 
         self.preview_cache = [None] * CAMERA_COUNT  # (img_id, w, h, tk_img)
@@ -241,7 +242,7 @@ class DashboardApp:
             status_frame = tk.Frame(frame, bg=self.colors["surface"])
             status_frame.grid(row=2, column=0, sticky="ew", padx=2, pady=5)
             
-            lbl_status = tk.Label(status_frame, text="INIT", bg=self.colors["border"], fg="white", font=("Segoe UI", 9, "bold"), width=10)
+            lbl_status = tk.Label(status_frame, text="WAIT", bg=self.colors["border"], fg="white", font=("Segoe UI", 9, "bold"), width=12)
             lbl_status.pack(side=tk.RIGHT, padx=5)
             self.cam_labels.append(lbl_status)
 
@@ -620,6 +621,9 @@ class DashboardApp:
         try:
             if self.notebook.index("current") != 0: return
         except: pass
+
+        # Give the operator immediate feedback before preview shutdown / camera IO starts.
+        self.mark_connected_cameras_go()
         
         # Stop preview before capturing high-res
         if self.capture_manager:
@@ -661,22 +665,44 @@ class DashboardApp:
             self.capture_manager.start_preview()
 
     def update_camera_status(self, index, status_code):
+        if 0 <= index < len(self.cam_status_codes):
+            self.cam_status_codes[index] = status_code
+
+        text, color, fg_color = self._camera_status_display(status_code)
+        self.root.after(0, lambda: self._set_cam_label(index, text, color, fg_color))
+
+    def _camera_status_display(self, status_code):
         color_map = {
             0: self.colors["border"],     # OFF
-            1: self.colors["success"],    # READY
-            2: self.colors["warning"],    # BUSY
-            3: self.colors["accent"],     # OK
-            4: self.colors["danger"],     # ERR
-            5: self.colors["text_dim"]    # REVIEW
+            1: self.colors["accent"],     # READY
+            2: self.colors["warning"],    # GO
+            3: self.colors["success"],    # OK
+            4: self.colors["danger"],     # NG
+            5: self.colors["text_dim"]    # CHECK
         }
-        text_map = {0: "OFF", 1: "READY", 2: "BUSY", 3: "OK", 4: "ERR", 5: "REVIEW"}
+        text_map = {
+            0: "OFF",
+            1: "READY",
+            2: "GO",
+            3: "OK",
+            4: "NG",
+            5: "CHECK",
+        }
         
         color = color_map.get(status_code, "white")
         text = text_map.get(status_code, "???")
-        # Black text for yellow (BUSY), white for others
+        # Black text for yellow GO state, white for others.
         fg_color = "black" if status_code == 2 else "white"
-        
-        self.root.after(0, lambda: self._set_cam_label(index, text, color, fg_color))
+        return text, color, fg_color
+
+    def mark_connected_cameras_go(self):
+        text, color, fg_color = self._camera_status_display(2)
+        for idx, status_code in enumerate(self.cam_status_codes):
+            if status_code != 0:
+                self.cam_status_codes[idx] = 2
+                self._set_cam_label(idx, text, color, fg_color)
+        # Force repaint before blocking operations such as stopping preview threads.
+        self.root.update_idletasks()
 
     def _set_cam_label(self, index, text, bg_color, fg_color):
         if 0 <= index < len(self.cam_labels):

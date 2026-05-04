@@ -60,7 +60,12 @@ def _prepare_gige_enumeration():
     """初始化 SDK 並延長 GigE 列舉逾時（掃描與 connect 列舉前共用）。"""
     _ensure_mvs_sdk()
     try:
-        tmo_ret = MvCamera().MV_GIGE_SetEnumDevTimeout(1200)
+        try:
+            # Some MVS Python wrappers expose this as a static-style function.
+            tmo_ret = MvCamera.MV_GIGE_SetEnumDevTimeout(1200)
+        except TypeError:
+            # Older wrappers expose it as an instance method.
+            tmo_ret = MvCamera().MV_GIGE_SetEnumDevTimeout(1200)
         if tmo_ret != 0:
             logger.warning(f"MV_GIGE_SetEnumDevTimeout ret={tmo_ret}")
     except Exception as e:
