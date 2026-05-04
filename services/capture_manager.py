@@ -265,8 +265,11 @@ class CaptureManager:
         """
         logger.info("Stopping live preview...")
         for cam in self.cameras:
-            if cam is not None and hasattr(cam, "stop_streaming"):
-                cam.stop_streaming()
+            if cam is not None and hasattr(cam, "request_stop_streaming"):
+                cam.request_stop_streaming()
+        for cam in self.cameras:
+            if cam is not None and hasattr(cam, "wait_streaming_stopped"):
+                cam.wait_streaming_stopped()
 
     def shutdown(self):
         self.stop_preview()

@@ -56,16 +56,16 @@ def _ensure_mvs_sdk():
     return ret
 
 
-def _prepare_gige_enumeration():
-    """初始化 SDK 並延長 GigE 列舉逾時（掃描與 connect 列舉前共用）。"""
+def _prepare_gige_enumeration(enum_timeout_ms=200):
+    """初始化 SDK 並設定 GigE 列舉逾時（掃描用長逾時，連線用短逾時）。"""
     _ensure_mvs_sdk()
     try:
         try:
             # Some MVS Python wrappers expose this as a static-style function.
-            tmo_ret = MvCamera.MV_GIGE_SetEnumDevTimeout(1200)
+            tmo_ret = MvCamera.MV_GIGE_SetEnumDevTimeout(enum_timeout_ms)
         except TypeError:
             # Older wrappers expose it as an instance method.
-            tmo_ret = MvCamera().MV_GIGE_SetEnumDevTimeout(1200)
+            tmo_ret = MvCamera().MV_GIGE_SetEnumDevTimeout(enum_timeout_ms)
         if tmo_ret != 0:
             logger.warning(f"MV_GIGE_SetEnumDevTimeout ret={tmo_ret}")
     except Exception as e:
@@ -92,7 +92,7 @@ def enumerate_gige_camera_ips():
         logger.warning("enumerate_gige_camera_ips: MVS SDK not available.")
         return []
     try:
-        _prepare_gige_enumeration()
+        _prepare_gige_enumeration(enum_timeout_ms=1200)
 
         device_list = MV_CC_DEVICE_INFO_LIST()
         tlayer_type = _gige_transport_layer_mask()
@@ -138,7 +138,7 @@ class HikCamera(CameraBase):
             return False
 
         logger.info(f"Connecting to Camera {self.camera_id} ({self.ip_address})...")
-        _prepare_gige_enumeration()
+        _prepare_gige_enumeration(enum_timeout_ms=200)
 
         def _gige_current_ip(mvcc_dev_info):
             gige_info = mvcc_dev_info.SpecialInfo.stGigEInfo
@@ -366,11 +366,18 @@ class HikCamera(CameraBase):
         """
         Stop the preview stream and wait for thread to join.
         """
+        self.request_stop_streaming()
+        self.wait_streaming_stopped()
+
+    def request_stop_streaming(self):
+        """Signal preview thread to stop without waiting; allows all cameras to stop in parallel."""
         if not self.streaming:
             return
-            
         logger.info(f"Camera {self.camera_id} stopping preview stream...")
         self.streaming = False
+
+    def wait_streaming_stopped(self):
+        """Wait for preview thread after all cameras have been signaled to stop."""
         if self.stream_thread:
             self.stream_thread.join(timeout=2.0)
             self.stream_thread = None
