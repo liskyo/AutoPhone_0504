@@ -54,9 +54,19 @@ class UploadManager:
         success = False
         dest_folder = config.REMOTE_SERVER_STORAGE
         try:
-            local_parent = os.path.basename(os.path.dirname(file_path))
-            if local_parent:
-                dest_folder = os.path.join(config.REMOTE_SERVER_STORAGE, local_parent)
+            buf = os.path.normpath(config.LOCAL_TEMP_BUFFER)
+            dirname = os.path.normpath(os.path.dirname(file_path))
+            try:
+                if os.path.commonpath([buf, dirname]) == buf:
+                    rel = os.path.relpath(dirname, buf)
+                    if rel and rel != ".":
+                        dest_folder = os.path.join(config.REMOTE_SERVER_STORAGE, *rel.split(os.sep))
+            except ValueError:
+                pass
+            if dest_folder == config.REMOTE_SERVER_STORAGE:
+                local_parent = os.path.basename(os.path.dirname(file_path))
+                if local_parent:
+                    dest_folder = os.path.join(config.REMOTE_SERVER_STORAGE, local_parent)
         except Exception as e:
             logger.warning(f"Failed to resolve remote subfolder: {e}")
         FileService.ensure_directory(dest_folder)

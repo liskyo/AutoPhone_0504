@@ -2,6 +2,7 @@ import threading
 import time
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import config
 from hardware.mock_camera import MockCamera
 from hardware.hik_camera import HikCamera
@@ -23,6 +24,7 @@ class CaptureManager:
         self.serial_date = ""
         self.serial_counter = 0
         self.serial_lock = threading.Lock()
+        self._active_session_subfolder = None
         # Status codes: 0=Disconnected, 1=Connected, 2=Capturing, 3=Done/Success, 4=Error, 5=Reviewing
 
     def initialize_cameras(self):
@@ -53,7 +55,8 @@ class CaptureManager:
         timestamp_str = time.strftime("%Y%m%d_%H%M%S")
         date_str = time.strftime("%Y%m%d")
         self.pending_captures.clear()
-        
+        self._allocate_session_subfolder()
+
         futures = []
         for i, cam in enumerate(self.cameras):
             if self.update_cam_status_callback:
@@ -118,7 +121,8 @@ class CaptureManager:
         logger.info("Confirming save for pending captures...")
         timestamp_str = time.strftime("%Y%m%d_%H%M%S")
         date_str = time.strftime("%Y%m%d")
-        
+        self._allocate_session_subfolder()
+
         # We can run this in parallel too, but simple loop is fine for saving
         for index, img in self.pending_captures.items():
             try:
@@ -148,11 +152,22 @@ class CaptureManager:
             self.serial_date = date_str
             self.serial_counter = 0
 
+    @staticmethod
+    def _roc_yyyymmdd_folder():
+        """民國年 + 月日，例如 2026-05-04 -> 1150504（與常見簽呈日期格式一致）。"""
+        now = datetime.now()
+        roc_year = now.year - 1911
+        return f"{roc_year:03d}{now.month:02d}{now.day:02d}"
+
     def _get_sn_and_folder(self):
         date_str = time.strftime("%Y%m%d")
         sn = self.sn_code.strip() if self.sn_code else "UNKNOWN"
-        folder_name = f"{sn}_{date_str}"
-        folder_path = os.path.join(config.LOCAL_TEMP_BUFFER, folder_name)
+        roc_folder = self._roc_yyyymmdd_folder()
+        sub = getattr(self, "_active_session_subfolder", None)
+        if not sub:
+            now = datetime.now()
+            sub = now.strftime("%H%M%S_") + now.strftime("%f")[:3]
+        folder_path = os.path.join(config.LOCAL_TEMP_BUFFER, roc_folder, sub)
         return sn, date_str, folder_path
 
     def _next_filename(self, sn, date_str, folder_path):

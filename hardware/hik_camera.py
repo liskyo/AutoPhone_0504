@@ -62,7 +62,16 @@ class HikCamera(CameraBase):
             return False
 
         logger.info(f"Connecting to Camera {self.camera_id} ({self.ip_address})...")
-        
+
+        def _gige_current_ip(mvcc_dev_info):
+            gige_info = mvcc_dev_info.SpecialInfo.stGigEInfo
+            ip_raw = int(gige_info.nCurrentIp)
+            return f"{(ip_raw >> 24) & 0xFF}.{(ip_raw >> 16) & 0xFF}.{(ip_raw >> 8) & 0xFF}.{ip_raw & 0xFF}"
+
+        def _ip_is_configured(ip):
+            s = (ip or "").strip()
+            return bool(s) and s != "0.0.0.0"
+
         # 1. Enum Devices
         deviceList = MV_CC_DEVICE_INFO_LIST()
         tlayerType = MV_GIGE_DEVICE | MV_USB_DEVICE
@@ -71,36 +80,39 @@ class HikCamera(CameraBase):
             logger.error(f"Enum Devices failed: {ret}")
             return False
 
-        # 2. Find Device by IP (primary), fallback by index (secondary)
-        target_device_info = None
-        fallback_device_info = None
+        # GigE-only list (USB etc. in the same enum must not consume fallback slot indices)
+        gige_list = []
         for i in range(deviceList.nDeviceNum):
             mvcc_dev_info = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
             if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
-                # Get IP from GigE Info
-                gige_info = mvcc_dev_info.SpecialInfo.stGigEInfo
-                ip_raw = int(gige_info.nCurrentIp)
-                current_ip = f"{(ip_raw >> 24) & 0xFF}.{(ip_raw >> 16) & 0xFF}.{(ip_raw >> 8) & 0xFF}.{ip_raw & 0xFF}"
+                gige_list.append(mvcc_dev_info)
 
-                # Primary: exact IP match from config
-                if self.ip_address and current_ip == self.ip_address:
+        # 2. Match by configured IP, else fallback: camera_id N -> GigE list index N-1
+        target_device_info = None
+        want_ip = _ip_is_configured(self.ip_address)
+        cfg_ip = (self.ip_address or "").strip() if want_ip else ""
+
+        if want_ip:
+            for mvcc_dev_info in gige_list:
+                current_ip = _gige_current_ip(mvcc_dev_info)
+                if current_ip == cfg_ip:
                     target_device_info = mvcc_dev_info
                     logger.info(f"Camera {self.camera_id} matched by IP: {current_ip}")
                     break
 
-            # Secondary fallback: original index-based mapping
-            if i == (self.camera_id - 1):
-                fallback_device_info = mvcc_dev_info
-
         if target_device_info is None:
-            if fallback_device_info is not None:
-                target_device_info = fallback_device_info
+            idx = self.camera_id - 1
+            if 0 <= idx < len(gige_list):
+                target_device_info = gige_list[idx]
                 logger.warning(
-                    f"Camera {self.camera_id} target IP {self.ip_address} not found; "
-                    f"fallback to index-based device mapping."
+                    f"Camera {self.camera_id} IP {self.ip_address!r} unset or no match; "
+                    f"using GigE-only order fallback (index {idx} of {len(gige_list)})."
                 )
             else:
-                logger.error(f"Camera {self.camera_id} not found in device list.")
+                logger.error(
+                    f"Camera {self.camera_id} not found: {len(gige_list)} GigE device(s) enumerated, "
+                    f"need index {idx}."
+                )
                 return False
 
         # 3. Create Handle
