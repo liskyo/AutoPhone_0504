@@ -1,9 +1,9 @@
 
 import sys
+import os
 import threading
 import time
 import ctypes
-import numpy as np
 from PIL import Image
 from hardware.mock_camera import CameraBase
 from utils.logger import setup_logger
@@ -13,14 +13,33 @@ logger = setup_logger("HikHardware")
 # --- SDK IMPORT CHECK ---
 # Default installation path for Hikrobot MVS Python SDK
 SDK_PATH = r"C:\Program Files (x86)\MVS\Development\Samples\Python\MvImport"
+MVS_RUNTIME_PATH_64 = r"C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64"
+MVS_RUNTIME_PATH_32 = r"C:\Program Files (x86)\Common Files\MVS\Runtime\Win32_i86"
+
+def _prepare_mvs_runtime_paths():
+    runtime_path = MVS_RUNTIME_PATH_64 if sys.maxsize > 2**32 else MVS_RUNTIME_PATH_32
+    if os.path.isdir(runtime_path):
+        # Ensure ctypes WinDLL can resolve MvCameraControl.dll and its dependencies.
+        os.environ["PATH"] = runtime_path + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(runtime_path)
+            except Exception as e:
+                logger.warning(f"add_dll_directory failed: {e}")
+    else:
+        logger.warning(f"MVS runtime path not found: {runtime_path}")
 
 try:
+    _prepare_mvs_runtime_paths()
     sys.path.append(SDK_PATH)
     from MvCameraControl_class import *
     HIK_SDK_AVAILABLE = True
-except ImportError:
+except Exception as e:
     HIK_SDK_AVAILABLE = False
-    logger.warning(f"Hikvision SDK not found at {SDK_PATH}. Please verify installation path.")
+    logger.warning(f"Hikvision SDK unavailable at startup: {e}")
+    logger.warning(f"Please verify MVS installation path: {SDK_PATH}")
+
+import config
 
 class HikCamera(CameraBase):
     def __init__(self, camera_id, ip_address):
@@ -52,33 +71,37 @@ class HikCamera(CameraBase):
             logger.error(f"Enum Devices failed: {ret}")
             return False
 
-        # 2. Find Device by IP
+        # 2. Find Device by IP (primary), fallback by index (secondary)
         target_device_info = None
+        fallback_device_info = None
         for i in range(deviceList.nDeviceNum):
             mvcc_dev_info = cast(deviceList.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
             if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
                 # Get IP from GigE Info
                 gige_info = mvcc_dev_info.SpecialInfo.stGigEInfo
-                # Convert c_ubyte array to string
-                current_ip = f"{gige_info.nCurrentIp & 0xFF000000 >> 24}.{gige_info.nCurrentIp & 0x00FF0000 >> 16}.{gige_info.nCurrentIp & 0x0000FF00 >> 8}.{gige_info.nCurrentIp & 0x000000FF}"
-                
-                # Note: The above bitwise might depend on endianness, easier to compare strict strings if accessible
-                # A safer way in Python SDK examples usually iterates and prints IPs.
-                # For now, let's trust the logic or use a simpler match if needed.
-                # Actually, the easier strategy is to match by UserDefinedName or SerialNumber if IP is tricky.
-                # But let's assume we scan all and connect to any for demo, or match IP string.
-                pass
-            
-            # SIMPLIFICATION FOR THIS PROJECT:
-            # We assume connection by Index for now if IP matching is complex in raw ctypes
-            # Ideally, we match config IP.
-            if i == (self.camera_id - 1): # Simple mapping: Cam 1 -> Index 0
-                target_device_info = mvcc_dev_info
-                break
+                ip_raw = int(gige_info.nCurrentIp)
+                current_ip = f"{(ip_raw >> 24) & 0xFF}.{(ip_raw >> 16) & 0xFF}.{(ip_raw >> 8) & 0xFF}.{ip_raw & 0xFF}"
+
+                # Primary: exact IP match from config
+                if self.ip_address and current_ip == self.ip_address:
+                    target_device_info = mvcc_dev_info
+                    logger.info(f"Camera {self.camera_id} matched by IP: {current_ip}")
+                    break
+
+            # Secondary fallback: original index-based mapping
+            if i == (self.camera_id - 1):
+                fallback_device_info = mvcc_dev_info
 
         if target_device_info is None:
-            logger.error(f"Camera {self.camera_id} not found in device list.")
-            return False
+            if fallback_device_info is not None:
+                target_device_info = fallback_device_info
+                logger.warning(
+                    f"Camera {self.camera_id} target IP {self.ip_address} not found; "
+                    f"fallback to index-based device mapping."
+                )
+            else:
+                logger.error(f"Camera {self.camera_id} not found in device list.")
+                return False
 
         # 3. Create Handle
         self.handle = MvCamera()
@@ -158,8 +181,10 @@ class HikCamera(CameraBase):
         stFrameInfo = MV_FRAME_OUT_INFO_EX()
         memset(byref(stFrameInfo), 0, sizeof(MV_FRAME_OUT_INFO_EX))
         
-        # Wait up to 1000ms
-        ret = self.handle.MV_CC_GetOneFrameTimeout(byref(self.pData), self.nPayloadSize, stFrameInfo, 1000)
+        timeout_ms = max(200, min(int(config.GRAB_FRAME_TIMEOUT_MS), 60000))
+        ret = self.handle.MV_CC_GetOneFrameTimeout(
+            byref(self.pData), self.nPayloadSize, stFrameInfo, timeout_ms
+        )
         
         if ret == 0:
             # Success
@@ -167,7 +192,7 @@ class HikCamera(CameraBase):
             height = stFrameInfo.nHeight
             pixelType = stFrameInfo.enPixelType
             
-            logger.info(f"Frame Captured: {width}x{height} | PayloadSize: {self.nPayloadSize} | PixelType: {pixelType}")
+            logger.debug(f"Frame Captured: {width}x{height} | PayloadSize: {self.nPayloadSize} | PixelType: {pixelType}")
 
             # Check for insane dimensions
             if width > 20000 or height > 20000:

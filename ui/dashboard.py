@@ -1,18 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, Toplevel
 from PIL import Image, ImageTk
-import threading
-from config import UI_PREVIEW_WIDTH, UI_PREVIEW_HEIGHT, CAMERA_COUNT
-
-# Dictionary for status colors
-STATUS_COLORS = {
-    0: "gray",    # Disconnected
-    1: "green",   # Ready/Connected
-    2: "yellow",  # Capturing
-    3: "blue",    # Success/Queued
-    4: "red",      # Error
-    5: "orange"   # Reviewing
-}
+from config import CAMERA_COUNT
 
 class DashboardApp:
     def __init__(self, root, on_snap, on_confirm, on_retake, capture_manager=None):
@@ -30,6 +19,7 @@ class DashboardApp:
         self.cam_canvases = []
         self.tk_images = [None] * CAMERA_COUNT 
         self.original_images = [None] * CAMERA_COUNT 
+        self.preview_cache = [None] * CAMERA_COUNT  # (img_id, w, h, tk_img)
         self.upload_count_var = tk.StringVar(value="Upload Queue: 0")
         self.sn_var = tk.StringVar()
         
@@ -97,15 +87,27 @@ class DashboardApp:
         style.configure("TEntry", fieldbackground=self.colors["surface"], foreground=self.colors["text"], bordercolor=self.colors["border"])
         
     def setup_ui(self):
-        # Fullscreen Mode (Aggressive)
-        def enforce_fullscreen():
-            self.root.attributes('-fullscreen', True)
-            self.root.state('zoomed') # Fallback for Windows
-            
-        self.root.after(100, enforce_fullscreen)
-        
-        self.root.bind("<F11>", lambda event: self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen")))
-        self.root.bind("<Escape>", lambda event: self.root.attributes("-fullscreen", False)) # Escape to exit fullscreen 
+        # Keep OS title bar so the window can be moved to another monitor and minimized.
+        # Startup: maximized (not kiosk fullscreen). True fullscreen uses keys that avoid
+        # laptop F11 (often HP airplane mode / OEM function).
+        self.root.resizable(True, True)
+
+        def maximize_with_titlebar():
+            try:
+                self.root.attributes("-fullscreen", False)
+            except tk.TclError:
+                pass
+            try:
+                self.root.state("zoomed")
+            except tk.TclError:
+                try:
+                    self.root.attributes("-zoomed", True)
+                except tk.TclError:
+                    pass
+
+        self.root.after(100, maximize_with_titlebar)
+        for _seq in ("<Alt-Return>", "<Alt-KP_Enter>", "<Control-Shift-F>"):
+            self.root.bind(_seq, self._toggle_root_fullscreen)
 
         # Main Container
         main_container = tk.Frame(self.root, bg=self.colors["bg"])
@@ -121,6 +123,8 @@ class DashboardApp:
         
         # Tab 2: Settings
         self.settings_frame = ttk.Frame(self.notebook, style="TFrame")
+        self.settings_frame.columnconfigure(0, weight=1)
+        self.settings_frame.rowconfigure(0, weight=1)
         self.notebook.add(self.settings_frame, text=' SETTINGS (設定) ')
 
         self.setup_monitor_tab()
@@ -144,20 +148,72 @@ class DashboardApp:
         tk.Button(header_frame, text="EXIT (離開程式)", bg="#d9534f", fg="white", font=("Segoe UI", 10, "bold"), 
                  command=self.on_closing).pack(side=tk.RIGHT, padx=5)
         
-        # Grid Area - Use a dark frame
-        self.grid_frame = tk.Frame(main_container, bg=self.colors["bg"])
-        self.grid_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=10)
+        # Grid Area (scrollable): keep original layout for first 5 cameras,
+        # and allow additional cameras (6/7/8...) in rows below.
+        grid_container = tk.Frame(main_container, bg=self.colors["bg"])
+        grid_container.pack(fill=tk.BOTH, expand=True, padx=0, pady=10)
+
+        grid_canvas = tk.Canvas(grid_container, bg=self.colors["bg"], highlightthickness=0)
+        grid_scrollbar = ttk.Scrollbar(grid_container, orient="vertical", command=grid_canvas.yview)
+        grid_canvas.configure(yscrollcommand=grid_scrollbar.set)
+        grid_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        grid_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.grid_frame = tk.Frame(grid_canvas, bg=self.colors["bg"])
+        grid_window = grid_canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+
+        def _on_grid_configure(_event):
+            grid_canvas.configure(scrollregion=grid_canvas.bbox("all"))
+
+        def _on_canvas_resize(event):
+            grid_canvas.itemconfigure(grid_window, width=event.width)
+
+        def _on_mousewheel(event):
+            # Windows / macOS
+            delta = int(-1 * (event.delta / 120)) if event.delta else 0
+            if delta != 0:
+                grid_canvas.yview_scroll(delta, "units")
+
+        def _on_mousewheel_linux_up(_event):
+            grid_canvas.yview_scroll(-1, "units")
+
+        def _on_mousewheel_linux_down(_event):
+            grid_canvas.yview_scroll(1, "units")
+
+        def _bind_mousewheel(_event):
+            grid_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            grid_canvas.bind_all("<Button-4>", _on_mousewheel_linux_up)
+            grid_canvas.bind_all("<Button-5>", _on_mousewheel_linux_down)
+
+        def _unbind_mousewheel(_event):
+            grid_canvas.unbind_all("<MouseWheel>")
+            grid_canvas.unbind_all("<Button-4>")
+            grid_canvas.unbind_all("<Button-5>")
+
+        self.grid_frame.bind("<Configure>", _on_grid_configure)
+        grid_canvas.bind("<Configure>", _on_canvas_resize)
+        grid_canvas.bind("<Enter>", _bind_mousewheel)
+        grid_canvas.bind("<Leave>", _unbind_mousewheel)
 
         self.grid_frame.columnconfigure(0, weight=1)
         self.grid_frame.columnconfigure(1, weight=1)
         self.grid_frame.columnconfigure(2, weight=1)
-        self.grid_frame.rowconfigure(0, weight=1)
-        self.grid_frame.rowconfigure(1, weight=1)
+        total_rows = 2 if CAMERA_COUNT <= 5 else 2 + ((CAMERA_COUNT - 5 + 2) // 3)
+        for r in range(total_rows):
+            self.grid_frame.rowconfigure(r, weight=1)
 
         # --- Generate Camera Blocks ---
         for i in range(CAMERA_COUNT):
-            row = 0 if i < 3 else 1
-            col = i if i < 3 else (i - 3)
+            # Keep original positions for first 5 cameras:
+            # row0: cam1, cam2, cam3 / row1: cam4, cam5 / row1 col2 reserved for control panel
+            if i < 3:
+                row, col = 0, i
+            elif i < 5:
+                row, col = 1, i - 3
+            else:
+                extra_index = i - 5
+                row = 2 + (extra_index // 3)
+                col = extra_index % 3
             
             # Card style frame
             frame = tk.Frame(self.grid_frame, bg=self.colors["surface"], bd=1, relief="solid")
@@ -234,29 +290,51 @@ class DashboardApp:
         return self.sn_var.get().strip()
 
     def setup_settings_tab(self):
-        import config 
-        from config import save_settings, load_settings, CAMERA_IPS, CAMERA_COUNT, CAMERA_WIDTH, CAMERA_HEIGHT, JPEG_QUALITY, LOCAL_TEMP_BUFFER, REMOTE_SERVER_STORAGE
+        from config import CAMERA_IPS, CAMERA_COUNT, LOCAL_TEMP_BUFFER, REMOTE_SERVER_STORAGE
 
-        # Center the settings form - Use pack to fill
         container = tk.Frame(self.settings_frame, bg=self.colors["bg"])
-        container.pack(fill=tk.BOTH, expand=True, padx=50, pady=30)
-        
-        # Use a Canvas with Scrollbar for Settings to ensure it works on small screens
-        # Create a main scrollable frame
+        container.grid(row=0, column=0, sticky="nsew", padx=24, pady=20)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
         canvas = tk.Canvas(container, bg=self.colors["bg"], highlightthickness=0)
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas, style="TFrame")
 
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        settings_win_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        def _settings_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _settings_canvas_resize(event):
+            w = max(event.width, 1)
+            canvas.itemconfigure(settings_win_id, width=w)
+            _settings_scrollregion()
+
+        scrollable_frame.bind("<Configure>", lambda e: _settings_scrollregion())
+        canvas.bind("<Configure>", _settings_canvas_resize)
+
+        def _settings_mousewheel(event):
+            if getattr(event, "delta", 0):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _settings_mousewheel_linux_up(_event):
+            canvas.yview_scroll(-1, "units")
+
+        def _settings_mousewheel_linux_down(_event):
+            canvas.yview_scroll(1, "units")
+
+        canvas.bind("<Enter>", lambda _e: canvas.focus_set())
+        canvas.bind("<MouseWheel>", _settings_mousewheel)
+        canvas.bind("<Button-4>", _settings_mousewheel_linux_up)
+        canvas.bind("<Button-5>", _settings_mousewheel_linux_down)
+        scrollable_frame.bind("<MouseWheel>", _settings_mousewheel)
+        scrollable_frame.bind("<Button-4>", _settings_mousewheel_linux_up)
+        scrollable_frame.bind("<Button-5>", _settings_mousewheel_linux_down)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
         
         # Custom Style for Combobox to ensure visibility
         style = ttk.Style()
@@ -274,17 +352,31 @@ class DashboardApp:
         tk.Button(header_frame, text="EXIT (離開程式)", bg="#d9534f", fg="white", font=("Segoe UI", 10, "bold"), 
                  command=self.on_closing).pack(side=tk.RIGHT, padx=5)
 
+        hint = tk.Frame(scrollable_frame, bg=self.colors["bg"])
+        hint.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(
+            hint,
+            text="全螢幕切換：Alt+Enter（或數字鍵 Enter）／Ctrl+Shift+F（筆電 F11 常為飛航模式故未使用）",
+            font=("Segoe UI", 9),
+            bg=self.colors["bg"],
+            fg=self.colors["text_dim"],
+            wraplength=900,
+            justify=tk.LEFT,
+        ).pack(anchor="w", padx=2)
+
         # --- Group 1: Camera Parameters (Compact Single Row) ---
         grp_cam = ttk.LabelFrame(scrollable_frame, text=" Camera Parameters (相機參數) ", padding=10)
         grp_cam.pack(fill=tk.X, pady=5)
-        
+        for c in range(6):
+            grp_cam.columnconfigure(c, weight=1 if c in (1, 3, 5) else 0)
+
         # Grid layout: Col 0: Label, 1: Input | Col 2: Label, 3: Input | Col 4: Label, 5: Input
         
         # 1. Camera Count
         ttk.Label(grp_cam, text="Count (數量):", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=5)
         self.ent_cam_count = ttk.Entry(grp_cam, width=5)
         self.ent_cam_count.insert(0, str(CAMERA_COUNT))
-        self.ent_cam_count.grid(row=0, column=1, sticky="w", padx=5)
+        self.ent_cam_count.grid(row=0, column=1, sticky="ew", padx=5)
 
         # 2. Resize Ratio
         ttk.Label(grp_cam, text="Resize (縮放 %):", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(20, 5))
@@ -301,7 +393,7 @@ class DashboardApp:
         else:
             self.cbo_resize.current(2) # Index 2 is "80"
             
-        self.cbo_resize.grid(row=0, column=3, sticky="w", padx=5)
+        self.cbo_resize.grid(row=0, column=3, sticky="ew", padx=5)
 
         # 3. JPEG Quality
         ttk.Label(grp_cam, text="Quality (品質):", style="Card.TLabel").grid(row=0, column=4, sticky="w", padx=(20, 5))
@@ -317,7 +409,27 @@ class DashboardApp:
         else:
             self.cbo_quality.current(4) # Index 4 is "80"
             
-        self.cbo_quality.grid(row=0, column=5, sticky="w", padx=5)
+        self.cbo_quality.grid(row=0, column=5, sticky="ew", padx=5)
+
+        # 4. Trigger stagger (worker-side delay: cam i waits i * stagger ms before trigger)
+        from config import CAPTURE_STAGGER_MS, GRAB_FRAME_TIMEOUT_MS
+        ttk.Label(
+            grp_cam,
+            text="Stagger (觸發錯開 ms, 0=關):",
+            style="Card.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 0))
+        self.ent_stagger_ms = ttk.Entry(grp_cam, width=6)
+        self.ent_stagger_ms.insert(0, str(CAPTURE_STAGGER_MS))
+        self.ent_stagger_ms.grid(row=1, column=2, sticky="ew", padx=5, pady=(10, 0))
+
+        ttk.Label(
+            grp_cam,
+            text="Grab timeout (取幀逾時 ms):",
+            style="Card.TLabel",
+        ).grid(row=1, column=3, sticky="w", padx=(20, 5), pady=(10, 0))
+        self.ent_grab_timeout_ms = ttk.Entry(grp_cam, width=6)
+        self.ent_grab_timeout_ms.insert(0, str(GRAB_FRAME_TIMEOUT_MS))
+        self.ent_grab_timeout_ms.grid(row=1, column=4, sticky="ew", padx=5, pady=(10, 0))
 
         # --- Group 2: Paths ---
         grp_path = ttk.LabelFrame(scrollable_frame, text=" Storage Paths ", padding=10)
@@ -326,7 +438,7 @@ class DashboardApp:
 
         # Local
         ttk.Label(grp_path, text="Local:", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=5)
-        self.ent_local_path = ttk.Entry(grp_path, width=50) # Increased width
+        self.ent_local_path = ttk.Entry(grp_path)
         self.ent_local_path.insert(0, LOCAL_TEMP_BUFFER)
         self.ent_local_path.grid(row=0, column=1, sticky="ew", padx=5)
         tk.Button(grp_path, text="...", bg=self.colors["accent"], fg="white", font=("Segoe UI", 9, "bold"), relief="flat", width=3,
@@ -334,7 +446,7 @@ class DashboardApp:
         
         # Remote
         ttk.Label(grp_path, text="Remote:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=5)
-        self.ent_remote_path = ttk.Entry(grp_path, width=50) # Increased width
+        self.ent_remote_path = ttk.Entry(grp_path)
         self.ent_remote_path.insert(0, REMOTE_SERVER_STORAGE)
         self.ent_remote_path.grid(row=1, column=1, sticky="ew", padx=5)
         tk.Button(grp_path, text="...", bg=self.colors["accent"], fg="white", font=("Segoe UI", 9, "bold"), relief="flat", width=3,
@@ -343,24 +455,21 @@ class DashboardApp:
         # --- Group 3: IP Config (Compact) ---
         grp_ip = ttk.LabelFrame(scrollable_frame, text=" IP Configuration ", padding=10)
         grp_ip.pack(fill=tk.BOTH, expand=True, pady=5)
-        
+        grp_ip.columnconfigure(1, weight=1)
+        grp_ip.columnconfigure(3, weight=1)
+
         self.ip_entries = {}
-        # Simple Grid: 4 columns
-        # Cam 1 [___]  Cam 2 [___]
-        # Cam 3 [___]  Cam 4 [___]
-        
-        columns = 4 # 2 sets of (Label + Entry) per row = 4 cols
         for i in range(1, 9):
             row = (i-1) // 2
             col_offset = ((i-1) % 2) * 2
-            
+
             lbl = ttk.Label(grp_ip, text=f"Cam {i}:", style="Card.TLabel")
             lbl.grid(row=row, column=col_offset, padx=(5, 2), pady=5, sticky="e")
-            
-            ent = ttk.Entry(grp_ip, width=12)
+
+            ent = ttk.Entry(grp_ip)
             val = CAMERA_IPS.get(i, "")
             ent.insert(0, val)
-            ent.grid(row=row, column=col_offset+1, padx=2, pady=5, sticky="w")
+            ent.grid(row=row, column=col_offset + 1, padx=2, pady=5, sticky="ew")
             self.ip_entries[i] = ent
 
         # --- Actions ---
@@ -393,7 +502,20 @@ class DashboardApp:
                     new_ips[str(i)] = val
             
             # Load Constants for Dimensions (locked)
-            from config import CAMERA_WIDTH, CAMERA_HEIGHT
+            from config import CAMERA_WIDTH, CAMERA_HEIGHT, load_settings, reload_settings
+
+            new_stagger = int(self.ent_stagger_ms.get())
+            if new_stagger < 0 or new_stagger > 2000:
+                messagebox.showerror("Invalid Input", "Stagger ms must be between 0 and 2000.")
+                return
+
+            new_grab_timeout = int(self.ent_grab_timeout_ms.get())
+            if new_grab_timeout < 200 or new_grab_timeout > 60000:
+                messagebox.showerror(
+                    "Invalid Input",
+                    "Grab frame timeout must be between 200 and 60000 ms.",
+                )
+                return
 
             payload = {
                 "camera_count": new_count,
@@ -403,22 +525,49 @@ class DashboardApp:
                 "jpeg_quality": new_quality,
                 "local_temp_buffer": new_local,
                 "remote_server_storage": new_remote,
-                "camera_ips": new_ips
+                "camera_ips": new_ips,
+                "capture_stagger_ms": new_stagger,
+                "grab_frame_timeout_ms": new_grab_timeout,
             }
-            
-            success = save_settings(payload)
+            merged = {**load_settings(), **payload}
+            success = save_settings(merged)
             if success:
-                messagebox.showinfo("Success", "Settings Saved!\n\nPlease restart application.")
+                reload_settings()
+                messagebox.showinfo(
+                    "Success",
+                    "設定已儲存。\n\n"
+                    "下列項目已立即套用（無需重啟程式）：\n"
+                    "觸發錯開、取幀逾時、JPEG 品質、縮放比例、本機/遠端路徑、上傳目的地。\n\n"
+                    "若變更「相機數量」或「IP」或需重排監控畫面，請關閉程式後再開，以重新連線與建立版面。",
+                )
             else:
                 messagebox.showerror("Error", "Failed to save settings.")
                 
         except ValueError:
             messagebox.showerror("Invalid Input", "Please check numeric fields.")
 
+    def _toggle_root_fullscreen(self, event=None):
+        try:
+            cur = bool(self.root.attributes("-fullscreen"))
+            self.root.attributes("-fullscreen", not cur)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _on_escape(self, event=None):
+        try:
+            if bool(self.root.attributes("-fullscreen")):
+                self.root.attributes("-fullscreen", False)
+                return
+        except tk.TclError:
+            pass
+        if self.btn_retake.winfo_viewable():
+            self.btn_retake.invoke()
+
     def setup_bindings(self):
         self.root.bind("<space>", lambda e: self.btn_snap.invoke() if self.btn_snap.winfo_viewable() else None)
         self.root.bind("<Return>", lambda e: self.btn_confirm.invoke() if self.btn_confirm.winfo_viewable() else None)
-        self.root.bind("<Escape>", lambda e: self.btn_retake.invoke() if self.btn_retake.winfo_viewable() else None)
+        self.root.bind("<Escape>", lambda e: self._on_escape())
 
     def handle_snap(self):
         try:
@@ -492,6 +641,7 @@ class DashboardApp:
     def _set_cam_image(self, index, pil_image):
         if 0 <= index < len(self.cam_canvases):
             self.original_images[index] = pil_image
+            self.preview_cache[index] = None
             self._redraw_canvas(index)
 
     def on_canvas_resize(self, event, index):
@@ -514,8 +664,14 @@ class DashboardApp:
         if new_w <= 1 or new_h <= 1:
             return # Canvas not ready
 
-        resized = img_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        tk_img = ImageTk.PhotoImage(resized)
+        cache = self.preview_cache[index]
+        if cache and cache[0] == id(img_pil) and cache[1] == new_w and cache[2] == new_h:
+            tk_img = cache[3]
+        else:
+            # BILINEAR is much faster than LANCZOS for live preview.
+            resized = img_pil.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            tk_img = ImageTk.PhotoImage(resized)
+            self.preview_cache[index] = (id(img_pil), new_w, new_h, tk_img)
         
         self.tk_images[index] = tk_img
         canvas.delete("all")

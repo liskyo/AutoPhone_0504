@@ -57,11 +57,6 @@ class FileService:
             tb = traceback.format_exc()
             logger.error(f"Failed to save image {filename}: {e}\n{tb}")
             return None
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            logger.error(f"Failed to save image {filename}: {e}\n{tb}")
-            return None
 
     @staticmethod
     def move_file(src_path, dest_folder):

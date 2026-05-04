@@ -1,9 +1,8 @@
 import threading
 import time
-import queue
 import os
 from concurrent.futures import ThreadPoolExecutor
-from config import CAMERA_COUNT, LOCAL_TEMP_BUFFER, USE_REAL_CAMERA, CAMERA_IPS, RESIZE_RATIO
+import config
 from hardware.mock_camera import MockCamera
 from hardware.hik_camera import HikCamera
 from services.file_service import FileService
@@ -16,7 +15,7 @@ class CaptureManager:
     def __init__(self, upload_queue, update_cam_status_callback=None, update_cam_image_callback=None):
         self.cameras = []
         self.upload_queue = upload_queue
-        self.executor = ThreadPoolExecutor(max_workers=CAMERA_COUNT)
+        self.executor = ThreadPoolExecutor(max_workers=config.CAMERA_COUNT)
         self.update_cam_status_callback = update_cam_status_callback 
         self.update_cam_image_callback = update_cam_image_callback # callback(cam_idx, pil_image)
         self.pending_captures = {} # {index: pil_image}
@@ -27,10 +26,10 @@ class CaptureManager:
         # Status codes: 0=Disconnected, 1=Connected, 2=Capturing, 3=Done/Success, 4=Error, 5=Reviewing
 
     def initialize_cameras(self):
-        logger.info(f"Initializing {CAMERA_COUNT} cameras... (Real Hardware: {USE_REAL_CAMERA})")
-        for i in range(CAMERA_COUNT):
-            if USE_REAL_CAMERA:
-                ip = CAMERA_IPS.get(i+1, "0.0.0.0")
+        logger.info(f"Initializing {config.CAMERA_COUNT} cameras... (Real Hardware: {config.USE_REAL_CAMERA})")
+        for i in range(config.CAMERA_COUNT):
+            if config.USE_REAL_CAMERA:
+                ip = config.CAMERA_IPS.get(i+1, "0.0.0.0")
                 cam = HikCamera(camera_id=i+1, ip_address=ip)
             else:
                 cam = MockCamera(camera_id=i+1)
@@ -73,6 +72,14 @@ class CaptureManager:
 
     def _capture_task(self, camera, index, batch_id, save_now):
         try:
+            # Stagger inside worker threads so GigE frames (esp. shared switch uplink)
+            # do not all hit the wire at once; does not block Tk main thread.
+            stagger_ms = max(0, int(config.CAPTURE_STAGGER_MS))
+            if stagger_ms > 0 and index > 0:
+                delay_s = (index * stagger_ms) / 1000.0
+                if delay_s > 0:
+                    time.sleep(delay_s)
+
             img = camera.grab_image()
             logger.debug(f"Cam {index+1} Grab success. Type: {type(img)}")
             
@@ -145,7 +152,7 @@ class CaptureManager:
         date_str = time.strftime("%Y%m%d")
         sn = self.sn_code.strip() if self.sn_code else "UNKNOWN"
         folder_name = f"{sn}_{date_str}"
-        folder_path = os.path.join(LOCAL_TEMP_BUFFER, folder_name)
+        folder_path = os.path.join(config.LOCAL_TEMP_BUFFER, folder_name)
         return sn, date_str, folder_path
 
     def _next_filename(self, sn, date_str, folder_path):
@@ -164,16 +171,14 @@ class CaptureManager:
                 serial += 1
 
     def _save_and_queue(self, index, img, batch_id):
-        from config import JPEG_QUALITY
-        
         # Apply Resizing if needed
-        if RESIZE_RATIO < 100:
+        if config.RESIZE_RATIO < 100:
              try:
                 # Calculate new size
                 w, h = img.size
-                new_w = int(w * (RESIZE_RATIO / 100.0))
-                new_h = int(h * (RESIZE_RATIO / 100.0))
-                logger.debug(f"Resizing Cam {index+1} from {w}x{h} to {new_w}x{new_h} ({RESIZE_RATIO}%)")
+                new_w = int(w * (config.RESIZE_RATIO / 100.0))
+                new_h = int(h * (config.RESIZE_RATIO / 100.0))
+                logger.debug(f"Resizing Cam {index+1} from {w}x{h} to {new_w}x{new_h} ({config.RESIZE_RATIO}%)")
                 
                 # Use PIL's resize for better quality control than thumbnail in this context
                 # (LANCZOS is good for downsampling)
@@ -184,7 +189,7 @@ class CaptureManager:
 
         sn, date_str, folder_path = self._get_sn_and_folder()
         filename = self._next_filename(sn, date_str, folder_path)
-        saved_path = FileService.save_image(img, folder_path, filename, quality=JPEG_QUALITY)
+        saved_path = FileService.save_image(img, folder_path, filename, quality=config.JPEG_QUALITY)
         
         if saved_path:
             self.upload_queue.put(saved_path)

@@ -1,7 +1,6 @@
 # -- coding: utf-8 --
 
 import sys
-import threading
 import msvcrt
 import os
 from ctypes import *

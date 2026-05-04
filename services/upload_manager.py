@@ -2,7 +2,8 @@ import time
 import queue
 import threading
 import os
-from config import REMOTE_SERVER_STORAGE, UPLOAD_RETRY_DELAY, MAX_RETRIES
+import config
+from config import UPLOAD_RETRY_DELAY, MAX_RETRIES
 from services.file_service import FileService
 from utils.logger import setup_logger
 
@@ -51,11 +52,11 @@ class UploadManager:
     def _handle_upload(self, file_path):
         attempt = 0
         success = False
-        dest_folder = REMOTE_SERVER_STORAGE
+        dest_folder = config.REMOTE_SERVER_STORAGE
         try:
             local_parent = os.path.basename(os.path.dirname(file_path))
             if local_parent:
-                dest_folder = os.path.join(REMOTE_SERVER_STORAGE, local_parent)
+                dest_folder = os.path.join(config.REMOTE_SERVER_STORAGE, local_parent)
         except Exception as e:
             logger.warning(f"Failed to resolve remote subfolder: {e}")
         FileService.ensure_directory(dest_folder)
