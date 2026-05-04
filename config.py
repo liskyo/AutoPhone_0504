@@ -35,8 +35,8 @@ DEFAULT_SETTINGS = {
         "5": "192.168.1.105"
     },
     # Per-camera index delay before software trigger (ms). Cam i waits i * stagger.
-    # Reduces GigE burst on shared switches; 0 disables. Typical 80–150.
-    "capture_stagger_ms": 100,
+    # Reduces GigE burst on shared switches; 0 disables. Typical 30–80; higher = slower batch.
+    "capture_stagger_ms": 50,
     # MVS GetOneFrameTimeout (ms); raise if still seeing timeouts after staggering.
     "grab_frame_timeout_ms": 2000
 }

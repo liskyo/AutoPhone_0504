@@ -74,8 +74,8 @@ class UploadManager:
         while attempt < MAX_RETRIES and not success:
             logger.info(f"Uploading {file_path} (Attempt {attempt+1}/{MAX_RETRIES})...")
             
-            # Simulate Network delay
-            time.sleep(0.5)
+            # Brief pause between retries (was 0.5s; shorter feels more responsive locally)
+            time.sleep(0.15)
             
             # Try copying file (Keep local)
             if FileService.copy_file(file_path, dest_folder):

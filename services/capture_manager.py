@@ -159,14 +159,32 @@ class CaptureManager:
         roc_year = now.year - 1911
         return f"{roc_year:03d}{now.month:02d}{now.day:02d}"
 
+    def _allocate_session_subfolder(self):
+        """
+        子資料夾：{民國年月日}_{HHMM}，例如 1150504_1405。
+        同一分鐘內重複則加上 _1、_2…
+        """
+        roc = self._roc_yyyymmdd_folder()
+        now = datetime.now()
+        base = f"{roc}_{now.strftime('%H%M')}"
+        root = os.path.join(config.LOCAL_TEMP_BUFFER, roc)
+        sub = base
+        cand = os.path.join(root, sub)
+        n = 0
+        while os.path.exists(cand):
+            n += 1
+            sub = f"{base}_{n}"
+            cand = os.path.join(root, sub)
+        self._active_session_subfolder = sub
+
     def _get_sn_and_folder(self):
         date_str = time.strftime("%Y%m%d")
         sn = self.sn_code.strip() if self.sn_code else "UNKNOWN"
         roc_folder = self._roc_yyyymmdd_folder()
         sub = getattr(self, "_active_session_subfolder", None)
         if not sub:
-            now = datetime.now()
-            sub = now.strftime("%H%M%S_") + now.strftime("%f")[:3]
+            self._allocate_session_subfolder()
+            sub = self._active_session_subfolder
         folder_path = os.path.join(config.LOCAL_TEMP_BUFFER, roc_folder, sub)
         return sn, date_str, folder_path
 
@@ -195,10 +213,9 @@ class CaptureManager:
                 new_h = int(h * (config.RESIZE_RATIO / 100.0))
                 logger.debug(f"Resizing Cam {index+1} from {w}x{h} to {new_w}x{new_h} ({config.RESIZE_RATIO}%)")
                 
-                # Use PIL's resize for better quality control than thumbnail in this context
-                # (LANCZOS is good for downsampling)
+                # BILINEAR: much faster than LANCZOS on multi‑cam 20MP batches; quality still OK for JPEG downscale.
                 from PIL import Image
-                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
              except Exception as e:
                 logger.error(f"Resize failed for Cam {index+1}: {e}")
 
