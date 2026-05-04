@@ -29,21 +29,28 @@ class CaptureManager:
 
     def initialize_cameras(self):
         logger.info(f"Initializing {config.CAMERA_COUNT} cameras... (Real Hardware: {config.USE_REAL_CAMERA})")
+        # Fixed-length list: slot i == CAM (i+1). Failed connects stay None so UI index matches physical slot.
+        self.cameras = [None] * config.CAMERA_COUNT
         for i in range(config.CAMERA_COUNT):
             if config.USE_REAL_CAMERA:
-                ip = config.CAMERA_IPS.get(i+1, "0.0.0.0")
-                cam = HikCamera(camera_id=i+1, ip_address=ip)
+                ip = config.CAMERA_IPS.get(i + 1, "0.0.0.0")
+                cam = HikCamera(camera_id=i + 1, ip_address=ip)
             else:
-                cam = MockCamera(camera_id=i+1)
-            
+                cam = MockCamera(camera_id=i + 1)
+
             if cam.connect():
-                self.cameras.append(cam)
+                self.cameras[i] = cam
                 if self.update_cam_status_callback:
-                    self.update_cam_status_callback(i, 1) # Connected
+                    self.update_cam_status_callback(i, 1)
             else:
                 logger.error(f"Failed to connect to Camera {i+1}")
+                self.cameras[i] = None
                 if self.update_cam_status_callback:
-                    self.update_cam_status_callback(i, 0) # Error
+                    self.update_cam_status_callback(i, 0)
+            # Brief pause so MVS SDK / driver can release handles before next OpenDevice
+            # (reduces flaky 2147484163 when opening many GigE devices in a tight loop).
+            if config.USE_REAL_CAMERA and i < config.CAMERA_COUNT - 1:
+                time.sleep(0.12)
         logger.info("All cameras initialized.")
 
     def trigger_batch_capture(self, save_now=True):
@@ -59,8 +66,10 @@ class CaptureManager:
 
         futures = []
         for i, cam in enumerate(self.cameras):
+            if cam is None:
+                continue
             if self.update_cam_status_callback:
-                self.update_cam_status_callback(i, 2) # Capturing
+                self.update_cam_status_callback(i, 2)
             futures.append(self.executor.submit(self._capture_task, cam, i, timestamp_str, save_now))
         
         if save_now:
@@ -74,6 +83,8 @@ class CaptureManager:
             threading.Thread(target=wait_and_reset, daemon=True).start()
 
     def _capture_task(self, camera, index, batch_id, save_now):
+        if camera is None:
+            return
         try:
             # Stagger inside worker threads so GigE frames (esp. shared switch uplink)
             # do not all hit the wire at once; does not block Tk main thread.
@@ -140,9 +151,9 @@ class CaptureManager:
         """
         logger.info("Discarding pending captures.")
         self.pending_captures.clear()
-        for i in range(len(self.cameras)):
-             if self.update_cam_status_callback:
-                self.update_cam_status_callback(i, 1) # Reset to Ready
+        for i, cam in enumerate(self.cameras):
+            if self.update_cam_status_callback:
+                self.update_cam_status_callback(i, 1 if cam is not None else 0)
 
     def set_sn(self, sn_code):
         self.sn_code = (sn_code or "").strip()
@@ -245,7 +256,7 @@ class CaptureManager:
                 self.update_cam_image_callback(idx, img)
 
         for cam in self.cameras:
-            if isinstance(cam, HikCamera): # Or MockCamera if it supported streaming
+            if cam is not None and isinstance(cam, HikCamera):
                 cam.start_streaming(preview_callback)
 
     def stop_preview(self):
@@ -254,11 +265,12 @@ class CaptureManager:
         """
         logger.info("Stopping live preview...")
         for cam in self.cameras:
-            if hasattr(cam, 'stop_streaming'): # Safety check
+            if cam is not None and hasattr(cam, "stop_streaming"):
                 cam.stop_streaming()
 
     def shutdown(self):
         self.stop_preview()
         for cam in self.cameras:
-            cam.disconnect()
+            if cam is not None:
+                cam.disconnect()
         self.executor.shutdown(wait=True)

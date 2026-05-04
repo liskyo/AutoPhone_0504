@@ -289,6 +289,41 @@ class DashboardApp:
     def get_sn(self):
         return self.sn_var.get().strip()
 
+    def scan_gige_ips_to_settings(self):
+        from tkinter import messagebox
+
+        try:
+            from hardware.hik_camera import enumerate_gige_camera_ips
+        except Exception as e:
+            messagebox.showerror("掃描失敗", f"無法載入相機模組：\n{e}")
+            return
+
+        ips = enumerate_gige_camera_ips()
+        if not ips:
+            messagebox.showwarning(
+                "掃描結果",
+                "未偵測到任何 GigE 相機。\n\n"
+                "請確認：相機已上電與接線、與 PC 同網段、MVS 可看到裝置，\n"
+                "且已安裝 MVS Python SDK 路徑（與連線真實相機時相同）。",
+            )
+            return
+
+        for i in range(1, 9):
+            ent = self.ip_entries.get(i)
+            if not ent:
+                continue
+            ent.delete(0, tk.END)
+            if i - 1 < len(ips):
+                ent.insert(0, ips[i - 1])
+
+        messagebox.showinfo(
+            "掃描完成",
+            f"已填入 {len(ips)} 台 GigE 相機的 IP（Cam 1 起依列舉順序）。\n\n"
+            "若台數少於預期：請關閉 MVS 後再掃一次；或在 MVS 客戶端確認是否皆為「標準 GigE」。\n"
+            "仍缺者請在欄位手動輸入 IP（例如 .101、.107），再按「儲存設定」並重開程式。\n\n"
+            "「Count (數量)」請與實際台數一致。",
+        )
+
     def setup_settings_tab(self):
         from config import CAMERA_IPS, CAMERA_COUNT, LOCAL_TEMP_BUFFER, REMOTE_SERVER_STORAGE
 
@@ -471,6 +506,18 @@ class DashboardApp:
             ent.insert(0, val)
             ent.grid(row=row, column=col_offset + 1, padx=2, pady=5, sticky="ew")
             self.ip_entries[i] = ent
+
+        scan_btn = tk.Button(
+            grp_ip,
+            text="掃描 GigE 相機並填入 IP（含 GenTL GigE；依列舉順序；Cam1=第1台…）",
+            bg=self.colors["accent"],
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            cursor="hand2",
+            command=self.scan_gige_ips_to_settings,
+        )
+        scan_btn.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(12, 4), padx=5)
 
         # --- Actions ---
         btn_frame = tk.Frame(scrollable_frame, bg=self.colors["bg"])
